@@ -77,29 +77,23 @@ function mainMenu(ctx, user) {
     [Markup.button.callback('💼 Browse Jobs', 'browse_jobs')],
     [Markup.button.callback('📋 My Jobs', 'my_jobs')],
     [Markup.button.callback('👤 My Profile', 'view_profile')],
-    [Markup.button.callback('💰 Balance', 'check_balance')],
+    [Markup.button.callback('💰 Wallet', 'wallet_menu')],
   ];
   if (user.role === 'client') {
     buttons.splice(1, 0, [Markup.button.callback('➕ Post a Job', 'post_job')]);
   }
   buttons.push([Markup.button.callback('🌐 Live Jobs (Web)', 'live_jobs_menu')]);
-  buttons.push([Markup.button.callback('💳 Wallet', 'wallet_menu')]);
   buttons.push([Markup.button.callback('⚙️ Settings', 'settings')]);
   return ctx.replyWithMarkdown(
-    `🏆 *Freelance Bot*\n\nWelcome back, *${escapeMarkdown(name)}*!\n${role}\n\n_Your freelance marketplace on Telegram_\n_🌐 Live Jobs from Upwork, Freelancer, Remote OK & more_\n_💳 Real payments via Stripe_`,
+    `🏆 *Freelance Bot*\n\nWelcome back, *${escapeMarkdown(name)}*!\n${role}\n\n_Your freelance marketplace on Telegram_\n_🌐 Live Jobs from Upwork, Freelancer, Remote OK & more_\n_💵 Payments via Cash App_`,
     Markup.inlineKeyboard(buttons)
   );
 }
 
-// ─── HTTP HEALTH & STRIPE WEBHOOK ──────────────────────────
+// ─── HTTP HEALTH ───────────────────────────────────────────
 const app = express();
 app.get('/', (req, res) => res.send('Freelance Bot is running 🤖'));
 app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
-
-// Stripe webhook — needs raw body
-app.post('/stripe-webhook', express.raw({ type: 'application/json' }), (req, res) => {
-  return payments.handleWebhook(req, res, data, saveData);
-});
 const server = http.createServer(app);
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Health server listening on port ${PORT}`);
@@ -371,31 +365,14 @@ bot.action('switch_role', (ctx) => {
   ]));
 });
 
-// ─── WALLET / PAYMENTS ─────────────────────────────────────
-bot.action('check_balance', (ctx) => {
-  ctx.answerCbQuery();
-  const user = getUser(ctx);
-  const stripeConfigured = payments.isConfigured();
-  let msg = `💳 *Your Wallet*\n\n*Balance:* $${(user.balance || 0).toFixed(2)}\n`;
-  if (user.transactions?.length) {
-    msg += `*Transactions:* ${user.transactions.length}\n`;
-  }
-  msg += `\n_Payments powered by Stripe_ 💳\n`;
-  const buttons = [
-    [Markup.button.callback('💰 Deposit Funds', 'deposit_menu')],
-    [Markup.button.callback('📊 Transaction History', 'transaction_history')],
-    [Markup.button.callback('🏠 Main Menu', 'main_menu')],
-  ];
-  return ctx.replyWithMarkdown(msg, Markup.inlineKeyboard(buttons));
-});
-
+// ─── WALLET / CASH APP ─────────────────────────────────────
 bot.action('wallet_menu', (ctx) => {
   ctx.answerCbQuery();
   const user = getUser(ctx);
   let msg = `💳 *Your Wallet*\n\n*Balance:* $${(user.balance || 0).toFixed(2)}\n`;
-  msg += `\nAdd funds to pay freelancers or receive payments for your work.`;
+  msg += `\n_Payments via Cash App_ 💵\nSend money to $joemama84 and the bot credits your wallet.`;
   const buttons = [
-    [Markup.button.callback('💰 Deposit Funds', 'deposit_menu')],
+    [Markup.button.callback('💵 Deposit via Cash App', 'deposit_menu')],
     [Markup.button.callback('📊 Transactions', 'transaction_history')],
     [Markup.button.callback('🏠 Main Menu', 'main_menu')],
   ];
@@ -404,15 +381,9 @@ bot.action('wallet_menu', (ctx) => {
 
 bot.action('deposit_menu', (ctx) => {
   ctx.answerCbQuery();
-  if (!payments.isConfigured()) {
-    return ctx.replyWithMarkdown(
-      `⚠️ *Stripe is being set up.*\n\nThe admin needs to add a Stripe secret key. Once configured, you can deposit funds here.\n\n_Check back soon!_`,
-      Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', 'check_balance')]])
-    );
-  }
   userState[ctx.from.id] = { step: 'deposit_amount' };
   return ctx.replyWithMarkdown(
-    `💰 *Deposit Funds*\n\nHow much would you like to deposit?\n\nMinimum: $1\n\nEnter the amount in USD (e.g. 50)\n\nType /cancel to cancel.`
+    `💵 *Deposit via Cash App*\n\nHow much would you like to deposit?\n\nMinimum: $1\n\nEnter the amount in USD (e.g. 50)\n\nType /cancel to cancel.`
   );
 });
 
@@ -589,28 +560,21 @@ bot.on('text', (ctx) => {
     return;
   }
 
-  // ─── Deposit Amount ───
+  // ─── Cash App Deposit ───
   if (state.step === 'deposit_amount') {
     const amount = parseFloat(text);
     if (isNaN(amount) || amount < 1) return ctx.reply('❌ Please enter a valid amount. Minimum: $1');
     delete userState[id];
-    ctx.reply(`⏳ *Creating payment link...*`, { parse_mode: 'Markdown' }).then(async () => {
-      const result = await payments.createDepositSession(
-        id, amount, ctx.from.username || ctx.from.first_name,
-        'https://t.me/joemama84_bot', 'https://t.me/joemama84_bot'
-      );
-      if (result.error) {
-        return ctx.reply(`❌ Payment error: ${result.error}`, Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', 'wallet_menu')]]));
-      }
-      return ctx.replyWithMarkdown(
-        `✅ *Payment link created!*\n\nClick below to pay **$${amount.toFixed(2)}** via Stripe:\n\n[💳 Pay $${amount.toFixed(2)}](${result.url})`,
-        Markup.inlineKeyboard([
-          [Markup.button.url('💳 Pay with Card', result.url)],
-          [Markup.button.callback('🔙 Back', 'wallet_menu')],
-        ])
-      );
-    });
-    return;
+    const depositId = require('crypto').randomBytes(3).toString('hex').toUpperCase();
+    return ctx.replyWithMarkdown(
+      `💵 *Deposit via Cash App*\n\n` +
+      `Please send **$${amount.toFixed(2)}** to:\n\n` +
+      `💵 **${payments.getCashtag()}**\n\n` +
+      `📝 *Include reference code:* **${depositId}**\n\n` +
+      `Then type:\n/paid ${depositId}\n\n` +
+      `_Funds are credited manually after you send._`,
+      Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', 'wallet_menu')]])
+    );
   }
 
   // ─── Set Bio ───
@@ -705,9 +669,16 @@ bot.command('search', async (ctx) => {
     return showLiveJobs(ctx, results, `Search: "${query}" (${results.length} results)`);
   });
 });
+bot.command('paid', (ctx) => {
+  const text = ctx.message.text.replace('/paid', '').trim();
+  return ctx.replyWithMarkdown(
+    `✅ *Payment reported!*\n\nThe admin will verify and credit your wallet once confirmed.\n\n_This is a manual process — please be patient._`,
+    Markup.inlineKeyboard([[Markup.button.callback('💳 Wallet', 'wallet_menu')]])
+  );
+});
 bot.command('help', (ctx) => {
   return ctx.replyWithMarkdown(
-    `*🤖 Freelance Bot Help*\n\n*Commands:*\n/start - Start the bot\n/setbio <text> - Set your bio\n/addskill <skill> - Add a skill\n/myjobs - View your posted jobs\n/livejobs - Browse live jobs from web\n/search <query> - Search live jobs\n/help - Show this message\n\n*Menu:* Use the buttons to browse jobs, post jobs, and manage your profile.`
+    `*🤖 Freelance Bot Help*\n\n*Commands:*\n/start - Start the bot\n/setbio <text> - Set your bio\n/addskill <skill> - Add a skill\n/myjobs - View your posted jobs\n/livejobs - Browse live jobs from web\n/search <query> - Search live jobs\n/paid <code> - Confirm Cash App payment sent\n/help - Show this message\n\n*Menu:* Use the buttons to browse jobs, post jobs, and manage your profile.`
   );
 });
 
