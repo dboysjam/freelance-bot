@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const http = require('http');
+const scraper = require('./scraper');
 
 const TOKEN = process.env.BOT_TOKEN;
 if (!TOKEN) {
@@ -16,7 +17,6 @@ const bot = new Telegraf(TOKEN);
 
 // ─── DATA STORE ─────────────────────────────────────────────
 const DATA_FILE = path.join(__dirname, 'data.json');
-
 let data = { users: {}, jobs: {}, reviews: {} };
 let jobIdCounter = 1;
 
@@ -29,17 +29,13 @@ function loadData() {
     }
   } catch (e) { console.error('Load error:', e.message); }
 }
-
 function saveData() {
   data._counter = jobIdCounter;
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-  } catch (e) { console.error('Save error:', e.message); }
+  try { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); } catch (e) { console.error('Save error:', e.message); }
 }
-
 loadData();
 
-// ─── USER STATE (in-memory for multi-step dialogs) ─────────
+// ─── USER STATE ─────────────────────────────────────────────
 const userState = {};
 
 // ─── CATEGORIES ─────────────────────────────────────────────
@@ -85,14 +81,15 @@ function mainMenu(ctx, user) {
   if (user.role === 'client') {
     buttons.splice(1, 0, [Markup.button.callback('➕ Post a Job', 'post_job')]);
   }
+  buttons.push([Markup.button.callback('🌐 Live Jobs (Web)', 'live_jobs_menu')]);
   buttons.push([Markup.button.callback('⚙️ Settings', 'settings')]);
   return ctx.replyWithMarkdown(
-    `🏆 *Freelance Bot*\n\nWelcome back, *${escapeMarkdown(name)}*!\n${role}\n\n_Your freelance marketplace on Telegram_`,
+    `🏆 *Freelance Bot*\n\nWelcome back, *${escapeMarkdown(name)}*!\n${role}\n\n_Your freelance marketplace on Telegram_\n_🌐 Live Jobs from Upwork, Freelancer, Remote OK & more_`,
     Markup.inlineKeyboard(buttons)
   );
 }
 
-// ─── HTTP HEALTH (for Render / cloud) ──────────────────────
+// ─── HTTP HEALTH ───────────────────────────────────────────
 const app = express();
 app.get('/', (req, res) => res.send('Freelance Bot is running 🤖'));
 app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
@@ -141,8 +138,8 @@ bot.action('post_job', (ctx) => {
   );
 });
 
-// ─── BROWSE JOBS ────────────────────────────────────────────
-function showJobList(ctx, edit = false, chatId, messageId) {
+// ─── BROWSE LOCAL JOBS ──────────────────────────────────────
+function showJobList(ctx, edit = false) {
   const allJobs = Object.values(data.jobs).filter(j => j.status === 'open');
   const id = ctx.from.id;
   let page = userState[id]?.jobPage || 0;
@@ -151,7 +148,6 @@ function showJobList(ctx, edit = false, chatId, messageId) {
   if (page >= totalPages) page = 0;
   const jobsToShow = allJobs.slice(page * perPage, (page + 1) * perPage);
   userState[id] = { ...userState[id], jobPage: page };
-
   let msg = `*💼 Available Jobs* (Page ${page + 1}/${totalPages})\n\n`;
   const buttons = [];
   for (const job of jobsToShow) {
@@ -163,7 +159,6 @@ function showJobList(ctx, edit = false, chatId, messageId) {
   if (page < totalPages - 1) navButtons.push(Markup.button.callback('Next ▶️', 'jobs_next'));
   if (navButtons.length) buttons.push(navButtons);
   buttons.push([Markup.button.callback('🔙 Back', 'main_menu')]);
-
   if (edit) {
     return ctx.editMessageText(msg, {
       parse_mode: 'Markdown',
@@ -182,11 +177,9 @@ bot.action('browse_jobs', async (ctx) => {
       Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', 'main_menu')]])
     );
   }
-  const id = ctx.from.id;
-  userState[id] = { ...userState[id], jobPage: 0 };
+  userState[ctx.from.id] = { ...userState[ctx.from.id], jobPage: 0 };
   return showJobList(ctx);
 });
-
 bot.action('jobs_prev', async (ctx) => {
   const id = ctx.from.id;
   userState[id] = { ...userState[id], jobPage: Math.max(0, (userState[id]?.jobPage || 0) - 1) };
@@ -383,6 +376,130 @@ bot.action('settings', (ctx) => {
   return ctx.replyWithMarkdown(`*⚙️ Settings*\n\n👤 Role: *${user.role || 'Not set'}*\n🛠️ Skills: ${user.skills?.length || 0} skills\n📝 Bio: ${user.bio ? '✅ Set' : '❌ Not set'}\n\n_Use the profile menu to update your info._`, Markup.inlineKeyboard([[Markup.button.callback('👤 Edit Profile', 'view_profile')], [Markup.button.callback('🏠 Main Menu', 'main_menu')]]));
 });
 
+// ─── LIVE JOBS FROM WEB ────────────────────────────────────
+bot.action('live_jobs_menu', async (ctx) => {
+  ctx.answerCbQuery();
+  const sources = scraper.WORKING_SOURCES;
+  let msg = `*🌐 Live Freelance Jobs*\n\n`;
+  msg += `*Search jobs from across the web:*\n\n`;
+  const buttons = sources.map(s => [Markup.button.callback(`${s.icon} ${s.name}`, `live_source_${s.name}`)]);
+  buttons.push([Markup.button.callback('🔍 Search All Live Jobs', 'live_search'), Markup.button.callback('🔄 Refresh', 'live_refresh')]);
+  buttons.push([Markup.button.callback('🏠 Main Menu', 'main_menu')]);
+  return ctx.replyWithMarkdown(msg, Markup.inlineKeyboard(buttons));
+});
+
+bot.action('live_search', async (ctx) => {
+  ctx.answerCbQuery();
+  userState[ctx.from.id] = { step: 'live_search' };
+  return ctx.replyWithMarkdown(
+    `🔍 *Search Live Jobs*\n\nTell me what you're looking for (e.g. "React", "Design", "Writing", "Python")\n\nType /cancel to cancel.`
+  );
+});
+
+function showLiveJobs(ctx, jobs, title, edit = false) {
+  const id = ctx.from.id;
+  let page = userState[id]?.livePage || 0;
+  const perPage = 4;
+  const totalPages = Math.ceil(jobs.length / perPage);
+  if (page >= totalPages) page = 0;
+  const jobsToShow = jobs.slice(page * perPage, (page + 1) * perPage);
+  userState[id] = { ...userState[id], livePage: page, liveJobs: jobs, liveTitle: title };
+
+  let msg = `*🌐 ${escapeMarkdown(title)}* (Page ${page + 1}/${totalPages})\n\n`;
+  const buttons = [];
+
+  for (const job of jobsToShow) {
+    msg += `${job.icon || '📌'} *${escapeMarkdown(job.title.substring(0, 50))}*\n`;
+    msg += `💰 ${job.budget || 'N/A'} · 📂 ${job.source}\n`;
+    const desc = job.description?.replace(/\n/g, ' ').substring(0, 100) || '';
+    if (desc) msg += `📝 ${escapeMarkdown(desc)}...\n`;
+    if (job.skills?.length) msg += `🏷️ ${job.skills.slice(0, 3).join(', ')}\n`;
+    msg += '\n';
+    buttons.push([Markup.button.callback('🔗 Open in Browser', `live_url_${encodeURIComponent(job.url)}`)]);
+  }
+
+  const navButtons = [];
+  if (page > 0) navButtons.push(Markup.button.callback('◀️ Prev', 'live_prev'));
+  if (page < totalPages - 1) navButtons.push(Markup.button.callback('Next ▶️', 'live_next'));
+  if (navButtons.length) buttons.push(navButtons);
+  buttons.push([Markup.button.callback('🔙 Back', 'live_jobs_menu'), Markup.button.callback('🏠 Main Menu', 'main_menu')]);
+
+  if (edit) {
+    return ctx.editMessageText(msg, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: buttons },
+    }).catch(() => ctx.replyWithMarkdown(msg, Markup.inlineKeyboard(buttons)));
+  }
+  return ctx.replyWithMarkdown(msg, Markup.inlineKeyboard(buttons));
+}
+
+bot.action('live_prev', async (ctx) => {
+  const id = ctx.from.id;
+  userState[id] = { ...userState[id], livePage: Math.max(0, (userState[id]?.livePage || 0) - 1) };
+  ctx.answerCbQuery();
+  const jobs = userState[id]?.liveJobs || [];
+  const title = userState[id]?.liveTitle || 'Live Jobs';
+  if (jobs.length === 0) return ctx.reply('No jobs cached. Please refresh.');
+  return showLiveJobs(ctx, jobs, title, true);
+});
+
+bot.action('live_next', async (ctx) => {
+  const id = ctx.from.id;
+  const jobs = userState[id]?.liveJobs || [];
+  const totalPages = Math.ceil(jobs.length / 4);
+  userState[id] = { ...userState[id], livePage: Math.min(totalPages - 1, (userState[id]?.livePage || 0) + 1) };
+  ctx.answerCbQuery();
+  const title = userState[id]?.liveTitle || 'Live Jobs';
+  if (jobs.length === 0) return ctx.reply('No jobs cached. Please refresh.');
+  return showLiveJobs(ctx, jobs, title, true);
+});
+
+bot.action('live_refresh', async (ctx) => {
+  ctx.answerCbQuery('Fetching latest jobs...');
+  ctx.reply('🔄 *Fetching jobs from freelance sites...*', { parse_mode: 'Markdown' }).then(async () => {
+    const jobs = await scraper.fetchAllJobs(true);
+    const id = ctx.from.id;
+    userState[id] = { ...userState[id], livePage: 0, liveJobs: jobs, liveTitle: 'All Live Jobs' };
+    if (jobs.length === 0) {
+      return ctx.replyWithMarkdown(
+        '⚠️ Could not fetch jobs right now. The freelance sites may be blocking requests.\n\n_Try again later or browse local jobs._',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', 'live_jobs_menu')]])
+      );
+    }
+    return showLiveJobs(ctx, jobs, `All Live Jobs (${jobs.length} found)`);
+  });
+});
+
+bot.action(/live_source_(.*)/, async (ctx) => {
+  ctx.answerCbQuery();
+  const sourceName = ctx.match[1];
+  ctx.reply(`🔄 Fetching ${sourceName} jobs...`, { parse_mode: 'Markdown' }).then(async () => {
+    const allJobs = await scraper.fetchAllJobs(true);
+    const filtered = scraper.getJobsBySource(sourceName, allJobs);
+    const id = ctx.from.id;
+    userState[id] = { ...userState[id], livePage: 0, liveJobs: filtered, liveTitle: sourceName };
+    if (filtered.length === 0) {
+      return ctx.replyWithMarkdown(
+        `⚠️ No jobs found from ${sourceName} right now. They may be blocking automated requests.`,
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', 'live_jobs_menu')]])
+      );
+    }
+    return showLiveJobs(ctx, filtered, `${sourceName} (${filtered.length} jobs)`);
+  });
+});
+
+bot.action(/live_url_(.*)/, async (ctx) => {
+  ctx.answerCbQuery();
+  const url = decodeURIComponent(ctx.match[1]);
+  if (url && url.startsWith('http')) {
+    return ctx.reply(`🔗 *Open this link:*\n${url}`, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[Markup.button.url('🌐 Open', url)]] },
+    });
+  }
+  return ctx.reply('❌ Invalid URL.');
+});
+
 // ─── TEXT HANDLER ───────────────────────────────────────────
 bot.on('text', (ctx) => {
   const text = ctx.message.text;
@@ -390,10 +507,28 @@ bot.on('text', (ctx) => {
   const state = userState[id];
   if (!state || !state.step) return ctx.replyWithMarkdown('Use the menu buttons below to navigate:', Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'main_menu')]]));
   if (text === '/cancel') { delete userState[id]; return ctx.replyWithMarkdown('❌ Cancelled.', Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'main_menu')]])); }
+
+  // ─── Live Jobs Search ───
+  if (state.step === 'live_search') {
+    delete userState[id];
+    ctx.reply(`🔍 Searching for "${text}"...`).then(async () => {
+      const allJobs = await scraper.fetchAllJobs();
+      const results = scraper.searchJobs(text, allJobs);
+      if (results.length === 0) return ctx.reply(`No results found for "${text}".`);
+      const uid = ctx.from.id;
+      userState[uid] = { ...userState[uid], livePage: 0, liveJobs: results, liveTitle: `Search: ${text}` };
+      return showLiveJobs(ctx, results, `Search: "${text}" (${results.length} results)`);
+    });
+    return;
+  }
+
+  // ─── Set Bio ───
   if (state.step === 'set_bio') {
     const user = getUser(ctx); user.bio = text; saveData(); delete userState[id];
     return ctx.replyWithMarkdown('✅ *Bio updated!*', Markup.inlineKeyboard([[Markup.button.callback('👤 View Profile', 'view_profile')]]));
   }
+
+  // ─── Post Job Flow ───
   if (state.step === 'post_title') {
     state.title = text; state.step = 'post_category';
     const buttons = SKILL_CATEGORIES.map(cat => [Markup.button.callback(cat, `jobcat_${cat}`)]);
@@ -458,9 +593,30 @@ bot.command('myjobs', (ctx) => {
   if (myJobs.length === 0) return ctx.reply('You have no jobs posted.');
   for (const j of myJobs) ctx.replyWithMarkdown(`📋 *${escapeMarkdown(j.title)}*\n💰 $${j.budget} · ${j.applicants?.length || 0} applicants`, Markup.inlineKeyboard([[Markup.button.callback('View', `view_job_${j.id}`)]]));
 });
+bot.command('livejobs', async (ctx) => {
+  ctx.reply('🔄 *Fetching latest freelance jobs...*', { parse_mode: 'Markdown' }).then(async () => {
+    const jobs = await scraper.fetchAllJobs(true);
+    const id = ctx.from.id;
+    userState[id] = { ...userState[id], livePage: 0, liveJobs: jobs, liveTitle: 'All Live Jobs' };
+    if (jobs.length === 0) return ctx.replyWithMarkdown('⚠️ No jobs fetched. Sites may be blocking requests.', Markup.inlineKeyboard([[Markup.button.callback('🏠 Main Menu', 'main_menu')]]));
+    return showLiveJobs(ctx, jobs, `All Live Jobs (${jobs.length} found)`);
+  });
+});
+bot.command('search', async (ctx) => {
+  const query = ctx.message.text.replace('/search', '').trim();
+  if (!query) return ctx.reply('Usage: /search React developer');
+  ctx.reply(`🔍 Searching for "${query}"...`).then(async () => {
+    const allJobs = await scraper.fetchAllJobs();
+    const results = scraper.searchJobs(query, allJobs);
+    if (results.length === 0) return ctx.reply(`No results found for "${query}".`);
+    const id = ctx.from.id;
+    userState[id] = { ...userState[id], livePage: 0, liveJobs: results, liveTitle: `Search: ${query}` };
+    return showLiveJobs(ctx, results, `Search: "${query}" (${results.length} results)`);
+  });
+});
 bot.command('help', (ctx) => {
   return ctx.replyWithMarkdown(
-    `*🤖 Freelance Bot Help*\n\n*Commands:*\n/start - Start the bot\n/setbio <text> - Set your bio\n/addskill <skill> - Add a skill\n/myjobs - View your posted jobs\n/help - Show this message\n\n*Menu:* Use the buttons to browse jobs, post jobs, and manage your profile.`
+    `*🤖 Freelance Bot Help*\n\n*Commands:*\n/start - Start the bot\n/setbio <text> - Set your bio\n/addskill <skill> - Add a skill\n/myjobs - View your posted jobs\n/livejobs - Browse live jobs from web\n/search <query> - Search live jobs\n/help - Show this message\n\n*Menu:* Use the buttons to browse jobs, post jobs, and manage your profile.`
   );
 });
 
